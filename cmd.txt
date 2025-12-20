@@ -1,0 +1,5 @@
+ACTIVATE env
+
+cmd /k venv\Scripts\activate.bat
+
+streamlit run app.py
