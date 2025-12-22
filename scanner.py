@@ -4,10 +4,8 @@ from option_selector import suggest_option
 from data_oanda import fetch_oanda
 
 
+# ---------------- PULLBACK CONFIRMATION ----------------
 def pullback_confirmed(df, direction):
-    """
-    Checks last 2 completed candles for pullback confirmation
-    """
     c1 = df.iloc[-3]  # pullback candle
     c2 = df.iloc[-2]  # confirmation candle
 
@@ -30,8 +28,10 @@ def pullback_confirmed(df, direction):
     return False
 
 
+# ---------------- MAIN SCANNER ----------------
 def scan_symbol(symbol, market):
-    # ---------------- DATA FETCH ----------------
+
+    # -------- DATA FETCH --------
     if market == "Commodities":
         df = fetch_oanda(symbol)
     else:
@@ -42,25 +42,24 @@ def scan_symbol(symbol, market):
             progress=False
         )
 
-    if df is None or df.empty or len(df) < 10:
+    if df is None or df.empty or len(df) < 15:
         return None
 
-    # Fix Yahoo multi-index columns
     if hasattr(df.columns, "levels"):
         df.columns = df.columns.get_level_values(0)
 
-    # ---------------- VWAP ----------------
+    # -------- VWAP --------
     df = calculate_vwap(df)
     last = df.iloc[-1]
 
     price = float(last["Close"])
     vwap = float(last["VWAP"])
 
-    # ---------------- CONTEXT ----------------
+    # -------- CONTEXT --------
     distance_pct = ((price - vwap) / vwap) * 100
     vwap_slope = df["VWAP"].iloc[-1] - df["VWAP"].iloc[-5]
 
-    # ---------------- SIGNAL ----------------
+    # -------- SIGNAL --------
     if price > vwap and vwap_slope > 0:
         signal = "Bullish"
     elif price < vwap and vwap_slope < 0:
@@ -68,7 +67,7 @@ def scan_symbol(symbol, market):
     else:
         signal = "WAIT"
 
-    # ---------------- TRADE STATE ----------------
+    # -------- TRADE STATE --------
     confirmed = False
 
     if abs(distance_pct) < 0.15 and signal in ["Bullish", "Bearish"]:
@@ -84,12 +83,15 @@ def scan_symbol(symbol, market):
         if confirmed:
             trade_state = f"{signal.upper()} Pullback (CONFIRMED)"
         else:
-            trade_state = f"{signal.upper()} Pullback (WAIT)"
+            trade_state = f"{signal} Setup Forming (WAIT)"
+
+    elif abs(distance_pct) <= 0.30:
+        trade_state = f"{signal} Setup Forming (WAIT)"
 
     else:
         trade_state = f"{signal.upper()} Continuation (RISKY)"
 
-    # ---------------- OPTION SELECTOR ----------------
+    # -------- OPTION BIAS --------
     option_bias = None
     if market in ["Index", "Stocks"] and "CONFIRMED" in trade_state:
         option_bias = suggest_option(symbol, price, signal, abs(distance_pct))

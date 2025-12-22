@@ -71,52 +71,22 @@ with st.spinner("Scanning symbols..."):
 if results:
     df = pd.DataFrame(results)
 
-    # Hide Option Bias for Commodities
     if market == "Commodities":
         df = df.drop(columns=["Option Bias"], errors="ignore")
 
-    # -------- ALERT ENGINE --------
-    for _, row in df.iterrows():
-        symbol = row["Symbol"]
-        state = row["Trade State"]
-        price = row["Price"]
-        vwap = row["VWAP"]
-        distance = abs(row["Distance %"])
+    confirmed_df = df[df["Trade State"].str.contains("CONFIRMED", na=False)]
+    setup_df = df[df["Trade State"].str.contains("Setup Forming", na=False)]
 
-        prev_state = st.session_state.last_confirmed_state.get(symbol)
+    if not confirmed_df.empty:
+        st.subheader("✅ CONFIRMED TRADES")
+        st.dataframe(confirmed_df, use_container_width=True)
 
-        # Store last confirmed state
-        if is_confirmed(state):
-            st.session_state.last_confirmed_state[symbol] = state
+    if not setup_df.empty:
+        st.subheader("⏳ SETUP FORMING — WATCHLIST")
+        st.dataframe(setup_df, use_container_width=True)
 
-        # ⚠️ VWAP LOST
-        if prev_state and "BULLISH" in prev_state and price < vwap:
-            key = alert_key(symbol, "VWAP_LOST_LONG")
-            if key not in st.session_state.alerted_events:
-                st.session_state.alerted_events.add(key)
-                st.error(f"⚠️ {symbol} — VWAP LOST AFTER CONFIRMATION")
-
-        if prev_state and "BEARISH" in prev_state and price > vwap:
-            key = alert_key(symbol, "VWAP_LOST_SHORT")
-            if key not in st.session_state.alerted_events:
-                st.session_state.alerted_events.add(key)
-                st.error(f"⚠️ {symbol} — VWAP LOST AFTER CONFIRMATION")
-
-        # 🛑 OPPOSITE CONFIRMATION
-        if prev_state and is_confirmed(state) and prev_state != state:
-            key = alert_key(symbol, "OPPOSITE_CONFIRMED")
-            if key not in st.session_state.alerted_events:
-                st.session_state.alerted_events.add(key)
-                st.error(f"🛑 {symbol} — OPPOSITE CONFIRMED | Bias Flip")
-
-        # 📈 EXTENSION WARNING
-        if prev_state and distance > 0.6:
-            key = alert_key(symbol, "EXTENDED")
-            if key not in st.session_state.alerted_events:
-                st.session_state.alerted_events.add(key)
-                st.warning(f"📈 {symbol} — EXTENDED FROM VWAP | Protect Profits")
-
-    st.dataframe(df, use_container_width=True)
+    if confirmed_df.empty and setup_df.empty:
+        st.info("No actionable VWAP setups right now.")
 
 else:
     st.info("No valid VWAP signals at the moment.")
