@@ -9,6 +9,18 @@ from telegram_alerts import send_telegram_alert
 from volume_filter import has_high_relative_volume
 from universe import NIFTY_50
 
+# ---------------- TRADE MEMORY ----------------
+if "trade_book" not in st.session_state:
+    # Example:
+    # {
+    #   "RELIANCE.NS": {
+    #       "side": "LONG",
+    #       "entry_price": 2450.5,
+    #       "entry_vwap": 2448.2,
+    #       "status": "ACTIVE"
+    #   }
+    # }
+    st.session_state.trade_book = {}
 
 
 # ---------------- UI CONFIG ----------------
@@ -62,7 +74,7 @@ with st.spinner("Scanning symbols..."):
        	   if not has_high_relative_volume(symbol):
                continue
 
-    res = scan_symbol(symbol, market)
+    res = scan_symbol(symbol, market, st.session_state.trade_book)
     if res:
         results.append(res)
 
