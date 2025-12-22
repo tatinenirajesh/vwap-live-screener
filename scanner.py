@@ -4,8 +4,13 @@ from option_selector import suggest_option
 from data_oanda import fetch_oanda
 
 
-# ---------------- PULLBACK CONFIRMATION ----------------
+# -------------------------------------------------
+# Pullback confirmation logic
+# -------------------------------------------------
 def pullback_confirmed(df, direction):
+    """
+    Confirms pullback using last 2 completed candles
+    """
     c1 = df.iloc[-3]  # pullback candle
     c2 = df.iloc[-2]  # confirmation candle
 
@@ -28,31 +33,34 @@ def pullback_confirmed(df, direction):
     return False
 
 
-# ---------------- MAIN SCANNER ----------------
+# -------------------------------------------------
+# Main scanner
+# -------------------------------------------------
 def scan_symbol(symbol, market, trade_book):
-
     # ---------------- DATA FETCH ----------------
     if market == "Commodities":
         df = fetch_oanda(symbol)
     else:
-        df = yf.download(symbol, interval="5m", period="1d", progress=False)
+        df = yf.download(
+            symbol,
+            interval="5m",
+            period="1d",
+            progress=False
+        )
 
-    if df is None or df.empty or len(df) < 25:
+    if df is None or df.empty or len(df) < 10:
         return None
 
+    # Fix Yahoo multi-index columns
     if hasattr(df.columns, "levels"):
         df.columns = df.columns.get_level_values(0)
 
+    # ---------------- VWAP ----------------
     df = calculate_vwap(df)
-
     last = df.iloc[-1]
+
     price = float(last["Close"])
     vwap = float(last["VWAP"])
-
-    # ---------------- VOLUME FILTER ----------------
-    recent_vol = df["Volume"].iloc[-3:-1].mean()   # last 2 completed candles
-    avg_vol = df["Volume"].iloc[-21:-1].mean()     # last 20 candles
-    vol_ratio = round(recent_vol / avg_vol, 2) if avg_vol > 0 else 0
 
     # ---------------- CONTEXT ----------------
     distance_pct = ((price - vwap) / vwap) * 100
@@ -66,83 +74,66 @@ def scan_symbol(symbol, market, trade_book):
     else:
         signal = "WAIT"
 
-    # ---------------- ACTIVE TRADE MANAGEMENT ----------------
-    if symbol in trade_book:
-        trade = trade_book[symbol]
-        side = trade["side"]
+    # ---------------- TRADE STATE ----------------
+    confirmed = False
 
-        # EXIT: VWAP lost
-        if side == "LONG" and price < vwap:
-            del trade_book[symbol]
-            return {
-                "Symbol": symbol,
-                "Trade State": "EXIT LONG (VWAP LOST)",
-                "Price": round(price, 2),
-                "VWAP": round(vwap, 2),
-                "Volume Ratio": vol_ratio
-            }
+    if abs(distance_pct) < 0.15 and signal in ["Bullish", "Bearish"]:
+        confirmed = pullback_confirmed(df, signal)
 
-        if side == "SHORT" and price > vwap:
-            del trade_book[symbol]
-            return {
-                "Symbol": symbol,
-                "Trade State": "EXIT SHORT (VWAP LOST)",
-                "Price": round(price, 2),
-                "VWAP": round(vwap, 2),
-                "Volume Ratio": vol_ratio
-            }
+    if abs(distance_pct) > 0.8:
+        trade_state = "AVOID (Extended)"
 
-        # Momentum fade
-        if vol_ratio < 0.7:
-            trade_state = f"ACTIVE {side} — MOMENTUM FADING"
-        elif abs(distance_pct) > 0.8:
-            trade_state = f"ACTIVE {side} — EXTENDED"
+    elif signal == "WAIT":
+        trade_state = "WAIT"
+
+    elif abs(distance_pct) < 0.15:
+        if confirmed:
+            trade_state = f"{signal.upper()} Pullback (CONFIRMED)"
         else:
-            trade_state = f"ACTIVE {side} — HEALTHY"
-
-        return {
-            "Symbol": symbol,
-            "Trade State": trade_state,
-            "Price": round(price, 2),
-            "VWAP": round(vwap, 2),
-            "Volume Ratio": vol_ratio
-        }
-
-    # ---------------- ENTRY LOGIC (ASSUMED ENTRY) ----------------
-    confirmed = (
-        abs(distance_pct) < 0.15
-        and signal in ["Bullish", "Bearish"]
-        and vol_ratio >= 1.2
-        and pullback_confirmed(df, signal)
-    )
-
-    if confirmed:
-        trade_book[symbol] = {
-            "side": "LONG" if signal == "Bullish" else "SHORT",
-            "entry_price": price,
-            "entry_vwap": vwap
-        }
-
-        trade_state = f"ACTIVE {'LONG' if signal == 'Bullish' else 'SHORT'} (VWAP Pullback)"
+            trade_state = f"{signal.upper()} Pullback (WAIT)"
 
     else:
-        if signal in ["Bullish", "Bearish"] and abs(distance_pct) <= 0.30:
-            trade_state = f"{signal} Setup Forming (WAIT)"
-        elif abs(distance_pct) > 0.8:
-            trade_state = "AVOID (Extended)"
-        else:
-            trade_state = "WAIT"
+        trade_state = f"{signal.upper()} Continuation (RISKY)"
 
+    # ---------------- TRADE MEMORY ----------------
+    previous_trade = trade_book.get(symbol)
+
+    # Entry
+    if "CONFIRMED" in trade_state:
+        trade_book[symbol] = {
+            "direction": signal,
+            "entry_price": price,
+            "state": trade_state
+        }
+
+    # Exit: VWAP lost
+    if previous_trade:
+        if previous_trade["direction"] == "Bullish" and price < vwap:
+            trade_state = "EXIT — VWAP LOST"
+            trade_book.pop(symbol, None)
+
+        elif previous_trade["direction"] == "Bearish" and price > vwap:
+            trade_state = "EXIT — VWAP LOST"
+            trade_book.pop(symbol, None)
+
+    # ---------------- OPTION SELECTOR ----------------
     option_bias = None
-    if market in ["Index", "Stocks"] and confirmed:
-        option_bias = suggest_option(symbol, price, signal, abs(distance_pct))
+    if market in ["Index", "Stocks"] and "CONFIRMED" in trade_state:
+        option_bias = suggest_option(
+            symbol=symbol,
+            price=price,
+            signal=signal,
+            distance=abs(distance_pct)
+        )
 
+    # ---------------- RETURN ----------------
     return {
         "Symbol": symbol,
-        "Trade State": trade_state,
+        "Signal": signal,
         "Price": round(price, 2),
         "VWAP": round(vwap, 2),
         "Distance %": round(distance_pct, 2),
-        "Volume Ratio": vol_ratio,
+        "VWAP Slope": round(vwap_slope, 4),
+        "Trade State": trade_state,
         "Option Bias": option_bias
     }
