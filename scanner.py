@@ -5,7 +5,7 @@ from data_oanda import fetch_oanda
 
 
 # -------------------------------------------------
-# Pullback confirmation (VWAP engine)
+# Equity-style pullback confirmation (Index / Stocks)
 # -------------------------------------------------
 def pullback_confirmed(df, direction):
     c1 = df.iloc[-3]
@@ -29,27 +29,10 @@ def pullback_confirmed(df, direction):
 
     return False
 
+
 # -------------------------------------------------
-# Momentum conditions
+# Commodity VWAP rejection logic (Gold / BTC)
 # -------------------------------------------------
-def momentum_valid(df, signal, distance_pct, vol_ratio):
-    if vol_ratio < 1.3:
-        return False
-
-    if not (0.3 <= abs(distance_pct) <= 0.8):
-        return False
-
-    candle_count = 3 if market == "Commodities" else 6
-    last_n = df.iloc[-candle_count:]
-
-    if signal == "Bullish":
-        return all(last_6["Close"] > last_6["VWAP"])
-
-    if signal == "Bearish":
-        return all(last_6["Close"] < last_6["VWAP"])
-
-    return False
-
 def vwap_rejection_commodity(df, direction):
     candle = df.iloc[-2]  # last completed candle
 
@@ -72,6 +55,29 @@ def vwap_rejection_commodity(df, direction):
         )
 
     return False
+
+
+# -------------------------------------------------
+# Momentum validation (market-specific)
+# -------------------------------------------------
+def momentum_valid(df, signal, distance_pct, vol_ratio, market):
+    if market != "Commodities" and vol_ratio < 1.3:
+        return False
+
+    if not (0.3 <= abs(distance_pct) <= 0.8):
+        return False
+
+    candle_count = 3 if market == "Commodities" else 6
+    recent = df.iloc[-candle_count:]
+
+    if signal == "Bullish":
+        return all(recent["Close"] > recent["VWAP"])
+
+    if signal == "Bearish":
+        return all(recent["Close"] < recent["VWAP"])
+
+    return False
+
 
 # -------------------------------------------------
 # Main scanner
@@ -152,18 +158,18 @@ def scan_symbol(symbol, market, trade_book):
 
     # ---------------- VWAP ENGINE ----------------
     if market == "Commodities":
-    confirmed_vwap = (
-        abs(distance_pct) < 0.30 and
-        signal in ["Bullish", "Bearish"] and
-        vwap_rejection_commodity(df, signal)
-    )
-else:
-    confirmed_vwap = (
-        abs(distance_pct) < 0.15 and
-        signal in ["Bullish", "Bearish"] and
-        pullback_confirmed(df, signal) and
-        vol_ratio >= 1.2
-    )
+        confirmed_vwap = (
+            abs(distance_pct) < 0.30 and
+            signal in ["Bullish", "Bearish"] and
+            vwap_rejection_commodity(df, signal)
+        )
+    else:
+        confirmed_vwap = (
+            abs(distance_pct) < 0.15 and
+            signal in ["Bullish", "Bearish"] and
+            pullback_confirmed(df, signal) and
+            vol_ratio >= 1.2
+        )
 
     if confirmed_vwap:
         trade_book[symbol] = {
@@ -182,7 +188,7 @@ else:
 
     # ---------------- MOMENTUM ENGINE ----------------
     if signal in ["Bullish", "Bearish"] and momentum_valid(
-        df, signal, distance_pct, vol_ratio
+        df, signal, distance_pct, vol_ratio, market
     ):
         trade_book[symbol] = {
             "side": "LONG" if signal == "Bullish" else "SHORT",
