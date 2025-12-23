@@ -5,14 +5,11 @@ from data_oanda import fetch_oanda
 
 
 # -------------------------------------------------
-# Pullback confirmation logic
+# Pullback confirmation (VWAP engine)
 # -------------------------------------------------
 def pullback_confirmed(df, direction):
-    """
-    Confirms pullback using last 2 completed candles
-    """
-    c1 = df.iloc[-3]  # pullback candle
-    c2 = df.iloc[-2]  # confirmation candle
+    c1 = df.iloc[-3]
+    c2 = df.iloc[-2]
 
     if direction == "Bullish":
         return (
@@ -34,28 +31,43 @@ def pullback_confirmed(df, direction):
 
 
 # -------------------------------------------------
+# Momentum conditions
+# -------------------------------------------------
+def momentum_valid(df, signal, distance_pct, vol_ratio):
+    if vol_ratio < 1.3:
+        return False
+
+    if not (0.3 <= abs(distance_pct) <= 0.8):
+        return False
+
+    last_6 = df.iloc[-6:]
+
+    if signal == "Bullish":
+        return all(last_6["Close"] > last_6["VWAP"])
+
+    if signal == "Bearish":
+        return all(last_6["Close"] < last_6["VWAP"])
+
+    return False
+
+
+# -------------------------------------------------
 # Main scanner
 # -------------------------------------------------
 def scan_symbol(symbol, market, trade_book):
+
     # ---------------- DATA FETCH ----------------
     if market == "Commodities":
         df = fetch_oanda(symbol)
     else:
-        df = yf.download(
-            symbol,
-            interval="5m",
-            period="1d",
-            progress=False
-        )
+        df = yf.download(symbol, interval="5m", period="1d", progress=False)
 
-    if df is None or df.empty or len(df) < 10:
+    if df is None or df.empty or len(df) < 25:
         return None
 
-    # Fix Yahoo multi-index columns
     if hasattr(df.columns, "levels"):
         df.columns = df.columns.get_level_values(0)
 
-    # ---------------- VWAP ----------------
     df = calculate_vwap(df)
     last = df.iloc[-1]
 
@@ -66,6 +78,11 @@ def scan_symbol(symbol, market, trade_book):
     distance_pct = ((price - vwap) / vwap) * 100
     vwap_slope = df["VWAP"].iloc[-1] - df["VWAP"].iloc[-5]
 
+    # ---------------- VOLUME ----------------
+    recent_vol = df["Volume"].iloc[-3:-1].mean()
+    avg_vol = df["Volume"].iloc[-21:-1].mean()
+    vol_ratio = round(recent_vol / avg_vol, 2) if avg_vol > 0 else 0
+
     # ---------------- SIGNAL ----------------
     if price > vwap and vwap_slope > 0:
         signal = "Bullish"
@@ -74,66 +91,90 @@ def scan_symbol(symbol, market, trade_book):
     else:
         signal = "WAIT"
 
-    # ---------------- TRADE STATE ----------------
-    confirmed = False
-
-    if abs(distance_pct) < 0.15 and signal in ["Bullish", "Bearish"]:
-        confirmed = pullback_confirmed(df, signal)
-
-    if abs(distance_pct) > 0.8:
-        trade_state = "AVOID (Extended)"
-
-    elif signal == "WAIT":
-        trade_state = "WAIT"
-
-    elif abs(distance_pct) < 0.15:
-        if confirmed:
-            trade_state = f"{signal.upper()} Pullback (CONFIRMED)"
-        else:
-            trade_state = f"{signal.upper()} Pullback (WAIT)"
-
-    else:
-        trade_state = f"{signal.upper()} Continuation (RISKY)"
-
-    # ---------------- TRADE MEMORY ----------------
     previous_trade = trade_book.get(symbol)
 
-    # Entry
-    if "CONFIRMED" in trade_state:
-        trade_book[symbol] = {
-            "direction": signal,
-            "entry_price": price,
-            "state": trade_state
+    # ---------------- EXIT ----------------
+    if previous_trade:
+        side = previous_trade["side"]
+
+        if side == "LONG" and price < vwap:
+            trade_book.pop(symbol)
+            return {
+                "Symbol": symbol,
+                "Engine": previous_trade["engine"],
+                "Trade State": "EXIT — VWAP LOST",
+                "Price": round(price, 2),
+                "VWAP": round(vwap, 2),
+                "Volume Ratio": vol_ratio
+            }
+
+        if side == "SHORT" and price > vwap:
+            trade_book.pop(symbol)
+            return {
+                "Symbol": symbol,
+                "Engine": previous_trade["engine"],
+                "Trade State": "EXIT — VWAP LOST",
+                "Price": round(price, 2),
+                "VWAP": round(vwap, 2),
+                "Volume Ratio": vol_ratio
+            }
+
+        return {
+            "Symbol": symbol,
+            "Engine": previous_trade["engine"],
+            "Trade State": f"ACTIVE {side} ({previous_trade['engine']})",
+            "Price": round(price, 2),
+            "VWAP": round(vwap, 2),
+            "Volume Ratio": vol_ratio
         }
 
-    # Exit: VWAP lost
-    if previous_trade:
-        if previous_trade["direction"] == "Bullish" and price < vwap:
-            trade_state = "EXIT — VWAP LOST"
-            trade_book.pop(symbol, None)
+    # ---------------- VWAP ENGINE ----------------
+    confirmed_vwap = (
+        abs(distance_pct) < 0.15 and
+        signal in ["Bullish", "Bearish"] and
+        pullback_confirmed(df, signal) and
+        vol_ratio >= 1.2
+    )
 
-        elif previous_trade["direction"] == "Bearish" and price > vwap:
-            trade_state = "EXIT — VWAP LOST"
-            trade_book.pop(symbol, None)
+    if confirmed_vwap:
+        trade_book[symbol] = {
+            "side": "LONG" if signal == "Bullish" else "SHORT",
+            "engine": "VWAP"
+        }
 
-    # ---------------- OPTION SELECTOR ----------------
-    option_bias = None
-    if market in ["Index", "Stocks"] and "CONFIRMED" in trade_state:
-        option_bias = suggest_option(
-            symbol=symbol,
-            price=price,
-            signal=signal,
-            distance=abs(distance_pct)
-        )
+        return {
+            "Symbol": symbol,
+            "Engine": "VWAP",
+            "Trade State": "ACTIVE (VWAP Pullback)",
+            "Price": round(price, 2),
+            "VWAP": round(vwap, 2),
+            "Volume Ratio": vol_ratio
+        }
 
-    # ---------------- RETURN ----------------
+    # ---------------- MOMENTUM ENGINE ----------------
+    if signal in ["Bullish", "Bearish"] and momentum_valid(
+        df, signal, distance_pct, vol_ratio
+    ):
+        trade_book[symbol] = {
+            "side": "LONG" if signal == "Bullish" else "SHORT",
+            "engine": "MOMENTUM"
+        }
+
+        return {
+            "Symbol": symbol,
+            "Engine": "MOMENTUM",
+            "Trade State": "ACTIVE (Momentum)",
+            "Price": round(price, 2),
+            "VWAP": round(vwap, 2),
+            "Volume Ratio": vol_ratio
+        }
+
+    # ---------------- NO TRADE ----------------
     return {
         "Symbol": symbol,
-        "Signal": signal,
+        "Engine": "-",
+        "Trade State": "WAIT",
         "Price": round(price, 2),
         "VWAP": round(vwap, 2),
-        "Distance %": round(distance_pct, 2),
-        "VWAP Slope": round(vwap_slope, 4),
-        "Trade State": trade_state,
-        "Option Bias": option_bias
+        "Volume Ratio": vol_ratio
     }
