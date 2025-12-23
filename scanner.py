@@ -29,7 +29,6 @@ def pullback_confirmed(df, direction):
 
     return False
 
-
 # -------------------------------------------------
 # Momentum conditions
 # -------------------------------------------------
@@ -40,7 +39,8 @@ def momentum_valid(df, signal, distance_pct, vol_ratio):
     if not (0.3 <= abs(distance_pct) <= 0.8):
         return False
 
-    last_6 = df.iloc[-6:]
+    candle_count = 3 if market == "Commodities" else 6
+    last_n = df.iloc[-candle_count:]
 
     if signal == "Bullish":
         return all(last_6["Close"] > last_6["VWAP"])
@@ -50,6 +50,28 @@ def momentum_valid(df, signal, distance_pct, vol_ratio):
 
     return False
 
+def vwap_rejection_commodity(df, direction):
+    candle = df.iloc[-2]  # last completed candle
+
+    body = abs(candle["Close"] - candle["Open"])
+
+    if direction == "Bullish":
+        lower_wick = min(candle["Open"], candle["Close"]) - candle["Low"]
+        return (
+            candle["Low"] < candle["VWAP"] and
+            candle["Close"] > candle["VWAP"] and
+            lower_wick > body
+        )
+
+    if direction == "Bearish":
+        upper_wick = candle["High"] - max(candle["Open"], candle["Close"])
+        return (
+            candle["High"] > candle["VWAP"] and
+            candle["Close"] < candle["VWAP"] and
+            upper_wick > body
+        )
+
+    return False
 
 # -------------------------------------------------
 # Main scanner
@@ -129,6 +151,13 @@ def scan_symbol(symbol, market, trade_book):
         }
 
     # ---------------- VWAP ENGINE ----------------
+    if market == "Commodities":
+    confirmed_vwap = (
+        abs(distance_pct) < 0.30 and
+        signal in ["Bullish", "Bearish"] and
+        vwap_rejection_commodity(df, signal)
+    )
+else:
     confirmed_vwap = (
         abs(distance_pct) < 0.15 and
         signal in ["Bullish", "Bearish"] and
